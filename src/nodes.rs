@@ -1,12 +1,16 @@
-use crate::{Input, Origin, Output, TranslationUnitContext, User, get_kind, id, node_kind_impl};
+use crate::{Context, Origin, User, id, node_kind_impl};
 use std::any::Any;
-use std::collections::HashMap;
 
 pub trait NodeKind: std::any::Any + std::fmt::Debug + Send + Sync {
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
     fn node_type(&self) -> &str;
 }
+
+/// Only set temporarily before we've initialised a node
+#[derive(Debug, Clone)]
+pub struct Uninitialized;
+node_kind_impl!(Uninitialized, "uninitialized");
 
 #[derive(Debug, Clone)]
 pub struct Apply {}
@@ -25,75 +29,64 @@ pub struct Lambda {}
 node_kind_impl!(Lambda, "lambda");
 
 #[derive(Debug, Clone)]
+pub struct TranslationUnit {}
+node_kind_impl!(TranslationUnit, "omega");
+
+#[derive(Debug, Clone)]
 pub struct Number(pub i128);
 node_kind_impl!(Number, "number");
+
+#[derive(Debug, Clone)]
+pub struct Switch;
+node_kind_impl!(Switch, "gamma");
 
 #[derive(Debug, Clone)]
 pub struct Placeholder(pub &'static str);
 node_kind_impl!(Placeholder, "placeholder");
 
 #[derive(Debug, Clone)]
-pub struct RecEnv {
-    // pub lambdas: PrimaryMap<id::Output, id::Node<Lambda>>,
-    pub lambdas: HashMap<id::AnyNode, (id::Argument, id::Output)>,
-}
+pub struct RecEnv {}
 node_kind_impl!(RecEnv, "phi");
 
-#[derive(Debug)]
-pub struct TranslationUnit {
-    pub region: id::Region,
+#[macro_export]
+macro_rules! node_kind_impl {
+    ($ty:ty, $kind:literal) => {
+        impl NodeKind for $ty {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+
+            fn node_type(&self) -> &str {
+                $kind
+            }
+        }
+    };
 }
-node_kind_impl!(TranslationUnit, "omega");
 
-impl TranslationUnitContext {
-    pub fn move_lambda_to_recenv(
-        &mut self,
-        lambda: id::Node<Lambda>,
-    ) -> (id::Argument, Output<Lambda>) {
-        let to = self.region;
+impl Context {
+    pub fn move_to_new_recenv(&mut self, [origin_lambda, user_lambda]: [id::Node<Lambda>; 2]) {
+        let env = self.add_recenv_node();
+        let env_region = self.only_child_region(env.id);
 
-        // TODO: it's difficult for me to imagine how this would look.
-        //
-        // So; let's try just using this in a real lower.
+        // Disconnect all connections to these these lambdas
+        let mut disconnected: Vec<(Origin, User)> = vec![];
+        self.for_each_edge(origin_lambda.id, |origin, user| {
+            disconnected.push((origin, user))
+        });
+        self.for_each_edge(user_lambda.id, |origin, user| {
+            disconnected.push((origin, user))
+        });
 
-        self.move_node(lambda.id, to);
-        todo!();
+        self.move_node(origin_lambda.id, env_region);
+        self.move_node(user_lambda.id, env_region);
+
+        // Re-create all the connections we disconnected
+        for (origin, user) in disconnected {
+            self.connect(origin, user);
+        }
     }
-
-    // Get another lambda from the recenv, if its been connected.
-    //
-    // Return the argument in the env region if it hasn't.
-    // pub fn get_lambda_in_recenv(
-    //     &self,
-    //     env: id::Node<RecEnv>,
-    //     in_: id::Node<Lambda>,
-    //     lambda: id::Node<Lambda>,
-    // ) -> Result<id::Argument, id::Argument> {
-    //     let env_region = self.region(env.id);
-    //     let env = get_kind(&self.nodes, env);
-
-    //     let env_lambda_argument = env
-    //         .lambdas
-    //         .get(&lambda.id)
-    //         .expect("target lambda is not in recenv")
-    //         .0;
-
-    //     for edge in &self.regions[env_region].edges {
-    //         if let Origin::Argument(arg) = edge.origin {
-    //             if arg == env_lambda_argument {
-    //                 if let User::Input(node_id, input) = edge.user {
-    //                     if node_id == in_.id {
-    //                         let arg = self.input_as_argument(Input {
-    //                             node: in_,
-    //                             id: input,
-    //                         });
-    //                         return Ok(arg);
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //     }
-
-    //     Err(env_lambda_argument)
-    // }
 }
