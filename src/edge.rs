@@ -93,9 +93,6 @@ impl Context {
 
                 self.inputs(onode)
                     .map(User::from)
-                    .inspect(|v| {
-                        dbg!(v);
-                    })
                     .find_map(|user| self.visit_nodes_upwards(user, f))
             }
             User::Result(result) => {
@@ -107,9 +104,6 @@ impl Context {
 
                 self.inputs(node_id)
                     .map(User::from)
-                    .inspect(|v| {
-                        dbg!(v);
-                    })
                     .find_map(|user| self.visit_nodes_upwards(user, f))
             }
         }
