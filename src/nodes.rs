@@ -195,6 +195,13 @@ impl InputOutForwarding for DoWhile {
     }
 }
 
+pub trait ResultOutputForwarding: NodeKind {}
+
+impl ResultOutputForwarding for GlobalV {}
+impl ResultOutputForwarding for Switch {}
+impl ResultOutputForwarding for RecEnv {}
+impl ResultOutputForwarding for DoWhile {}
+
 impl Context {
     pub(crate) fn move_to_new_recenv(
         &mut self,
@@ -253,9 +260,7 @@ impl Context {
         let node_id = self.regions[argument.region].container_node;
 
         // Omega nodes can not forward arguments as inputs
-        if self.node(node_id).region.is_none() {
-            return None;
-        }
+        self.node(node_id).region?;
 
         let offset = self.node(node_id).input_to_argument_offset;
         argument
@@ -308,5 +313,26 @@ impl Context {
         }
 
         Some(region.argument(arg))
+    }
+
+    pub fn result_as_output<K: ResultOutputForwarding>(&self, result: Result) -> Output<K> {
+        let container = self.regions[result.region].container_node;
+        let offset = self.node(container).output_to_result_offset;
+
+        let output = id::Output::from_u32(result.id.as_u32().checked_sub_signed(offset).unwrap());
+        id::Node::new(container).output(output)
+    }
+
+    pub fn output_as_result<K: ResultOutputForwarding>(
+        &self,
+        region: id::Region,
+        output: Output<K>,
+    ) -> Result {
+        let offset = self.node(output.node.id).output_to_result_offset;
+        let id = id::Result::from_u32(output.id.as_u32().checked_add_signed(offset).unwrap());
+
+        assert_eq!(self.regions[region].container_node, output.node.id);
+
+        region.result(id)
     }
 }

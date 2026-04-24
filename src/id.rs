@@ -29,7 +29,7 @@ entity_impl!(Input, "i");
 pub struct Output(pub(crate) u32);
 entity_impl!(Output, "o");
 
-#[derive(Debug, Hash)]
+#[derive(Debug)]
 pub struct Node<K> {
     pub id: AnyNode,
     _kind: PhantomData<K>,
@@ -37,7 +37,7 @@ pub struct Node<K> {
 
 impl<K> Clone for Node<K> {
     fn clone(&self) -> Self {
-        Self::new(self.id)
+        *self
     }
 }
 impl<K> Copy for Node<K> {}
@@ -45,6 +45,12 @@ impl<K> Copy for Node<K> {}
 impl<K> PartialEq for Node<K> {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
+    }
+}
+
+impl<K> std::hash::Hash for Node<K> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
     }
 }
 

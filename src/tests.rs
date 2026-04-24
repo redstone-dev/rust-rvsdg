@@ -79,7 +79,7 @@ fn connect_from_deeply_nested() {
 
             ctx.connect(
                 fb_applied_output,
-                ctx.try_output_as_result(switch_region_1, switch_output),
+                ctx.output_as_result(switch_region_1, switch_output),
             );
 
             fb_result
@@ -294,7 +294,7 @@ fn temp_png_graph() {
             // 0
             ctx.in_region(gamma_region0, |ctx| {
                 let argument = ctx.input_as_argument(gamma_region0, gamma_inputs[0]);
-                let result = ctx.try_output_as_result(gamma_region0, gamma_out);
+                let result = ctx.output_as_result(gamma_region0, gamma_out);
                 ctx.connect(argument, result);
             });
             // 1
@@ -312,7 +312,7 @@ fn temp_png_graph() {
                 ctx.connect(three, add_x);
                 ctx.connect(rem_out, add_y);
 
-                let result = ctx.try_output_as_result(gamma_region1, gamma_out);
+                let result = ctx.output_as_result(gamma_region1, gamma_out);
                 ctx.connect(add_out, result);
             });
 

@@ -16,14 +16,12 @@ pub enum Origin {
 }
 
 /// Input `id` belonging to `node`
-#[derive(Hash)]
 pub struct Input<K> {
     pub node: id::Node<K>,
     pub id: id::Input,
 }
 
 /// Output `id` belonging to `node`
-#[derive(Hash)]
 pub struct Output<K> {
     pub node: id::Node<K>,
     pub id: id::Output,
@@ -112,18 +110,12 @@ impl Context {
 
 impl<K> Clone for Input<K> {
     fn clone(&self) -> Self {
-        Input {
-            node: self.node,
-            id: self.id,
-        }
+        *self
     }
 }
 impl<K> Clone for Output<K> {
     fn clone(&self) -> Self {
-        Output {
-            node: self.node,
-            id: self.id,
-        }
+        *self
     }
 }
 
@@ -137,12 +129,26 @@ impl<K> PartialEq for Output<K> {
 }
 impl<K> Eq for Output<K> {}
 
+impl<K> std::hash::Hash for Output<K> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.node.id.hash(state);
+        self.id.hash(state);
+    }
+}
+
 impl<K> PartialEq for Input<K> {
     fn eq(&self, other: &Self) -> bool {
         self.node == other.node && self.id == other.id
     }
 }
 impl<K> Eq for Input<K> {}
+
+impl<K> std::hash::Hash for Input<K> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.node.id.hash(state);
+        self.id.hash(state);
+    }
+}
 
 impl<K> From<Input<K>> for User {
     fn from(input: Input<K>) -> Self {

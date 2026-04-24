@@ -17,27 +17,25 @@
 //! ```rust
 //! use rvsdg::{Context, nodes::Add};
 //!
-//! fn main() {
-//!     let mut ctx = Context::new("my testing graph");
+//! let mut ctx = Context::new("my testing graph");
 //!
-//!     let (f_output, f_region) = ctx.add_lambda_node();
-//!     ctx.in_region(f_region, |ctx| {
-//!         let one = ctx.add_number_node(1);
-//!         let two = ctx.add_number_node(2);
+//! let (f_output, f_region) = ctx.add_lambda_node();
+//! ctx.in_region(f_region, |ctx| {
+//!     let one = ctx.add_number_node(1);
+//!     let two = ctx.add_number_node(2);
 //!
-//!         let ([x, y], addition) = ctx.add_binop_node::<Add>();
+//!     let ([x, y], addition) = ctx.add_binop_node::<Add>();
 //!
-//!         ctx.connect(one, x);
-//!         ctx.connect(two, y);
+//!     ctx.connect(one, x);
+//!     ctx.connect(two, y);
 //!
-//!         let returned = ctx.add_result();
+//!     let returned = ctx.add_result();
 //!
-//!         ctx.connect(addition, returned);
-//!     });
+//!     ctx.connect(addition, returned);
+//! });
 //!
-//!     let apply_input = ctx.add_apply_node();
-//!     ctx.connect(f_output, apply_input);
-//! }
+//! let apply_input = ctx.add_apply_node();
+//! ctx.connect(f_output, apply_input);
 //! ```
 //!
 //! # Status
@@ -186,7 +184,7 @@ impl Context {
     ///
     /// Use [`EntityIter::next`] with `Context::region_id_pool` as parameter to progress.
     pub fn regions(&self, node: id::AnyNode) -> EntityIter<id::Region> {
-        EntityIter::from(self.nodes[node].regions.clone())
+        EntityIter::from(self.nodes[node].regions)
     }
 
     pub fn inputs(
@@ -281,7 +279,9 @@ impl Context {
         self.symbols[node] = sym.into();
     }
 
-    /// SAFETY: This function allows you to violate the rules of the RVSDG. To create regions safely,
+    /// # Safety
+    ///
+    /// This function allows you to violate the rules of the RVSDG. To create regions safely,
     /// use the safe functions such as [`Context::add_switch_branch`]
     pub unsafe fn add_region(
         &mut self,
@@ -411,14 +411,13 @@ impl Context {
     // GlobalV nodes have a singular output, representing the initialized value.
     pub fn add_globalv_node(&mut self) -> (Result, Output<GlobalV>) {
         let node = self.add_node(|ctx, node| unsafe {
-            ctx.add_region(node.id, 0, 1);
+            ctx.add_region(node.id, 0, 0);
             GlobalV {}
         });
 
         let output = self.add_output(node);
         let region = self.only_child_region(node.id);
-        let id = self.regions[region].results.push(None);
-        let result = Result { region, id };
+        let result = self.output_as_result(region, output);
 
         (result, output)
     }
@@ -565,7 +564,7 @@ impl Context {
 
     fn debug_node(&self, node: id::AnyNode) -> String {
         let sym = &self.symbols[node];
-        if sym == "" {
+        if sym.is_empty() {
             format!("{node}")
         } else {
             format!("{node}·{sym}")
@@ -619,26 +618,6 @@ impl Context {
         trace!("added output {output} for {}", self.debug_node(node.id));
 
         output
-    }
-
-    pub fn result_as_output<K>(&self, result: Result) -> Output<K> {
-        let container = self.regions[result.region].container_node;
-        let offset = self.node(container).output_to_result_offset;
-
-        // TODO: Is this valid for all nodes? Probably not right?
-        //
-        // We could assert but I think its better to stop this statically
-        let output = id::Output::from_u32(result.id.as_u32().checked_sub_signed(offset).unwrap());
-        id::Node::new(container).output(output)
-    }
-
-    pub fn try_output_as_result<K>(&self, region: id::Region, output: Output<K>) -> Result {
-        let offset = self.node(output.node.id).output_to_result_offset;
-        let id = id::Result::from_u32(output.id.as_u32().checked_add_signed(offset).unwrap());
-
-        assert_eq!(self.regions[region].container_node, output.node.id);
-
-        region.result(id)
     }
 
     pub fn add_argument(&mut self) -> Argument {
@@ -703,7 +682,7 @@ impl Context {
         [node_with_origin, node_with_user]: [id::AnyNode; 2],
     ) -> Option<Output<id::AnyNode>> {
         self.search_each_connected_input(node_with_origin, &mut |_, connection| match connection {
-            Origin::Output(output) => (output.node.id == node_with_user).then(|| output),
+            Origin::Output(output) => (output.node.id == node_with_user).then_some(output),
             Origin::Argument(_) => None,
         })
     }
@@ -721,18 +700,18 @@ impl Context {
 
         let region_with_user = self.region_containing_user(user);
 
-        if let Origin::Output(output) = origin {
-            if let Some((recenv, i)) = self.is_lambda_in_recenv(output.node.id) {
-                if region_with_origin == region_with_user {
-                    origin = self
-                        .only_child_region(recenv.id)
-                        .argument(id::Argument::from_u32(i))
-                        .into();
-                } else {
-                    origin = recenv.output(id::Output::from_u32(i)).into();
-                }
-                return self.try_connect(origin, user);
+        if let Origin::Output(output) = origin
+            && let Some((recenv, i)) = self.is_lambda_in_recenv(output.node.id)
+        {
+            if region_with_origin == region_with_user {
+                origin = self
+                    .only_child_region(recenv.id)
+                    .argument(id::Argument::from_u32(i))
+                    .into();
+            } else {
+                origin = recenv.output(id::Output::from_u32(i)).into();
             }
+            return self.try_connect(origin, user);
         }
 
         // TODO: Is this one needed?
@@ -749,18 +728,17 @@ impl Context {
         let node_with_user = self.user_associated_node(user);
 
         if let Some(_cycle) = self.find_cycle([node_with_origin, node_with_user]) {
-            if region_with_origin == region_with_user {
-                if let Some([node_with_origin, node_with_user]) =
+            if region_with_origin == region_with_user
+                && let Some([node_with_origin, node_with_user]) =
                     self.try_downcast_to_lambdas([node_with_origin, node_with_user])
-                {
-                    // If we're making a cyclic connection of two lambda nodes in the same region.
-                    //
-                    // Create a new RecEnv and move them to it.
-                    self.move_to_new_recenv([node_with_origin, node_with_user]);
+            {
+                // If we're making a cyclic connection of two lambda nodes in the same region.
+                //
+                // Create a new RecEnv and move them to it.
+                self.move_to_new_recenv([node_with_origin, node_with_user]);
 
-                    // Try again which should successfully connect this time
-                    return self.try_connect(origin, user);
-                }
+                // Try again which should successfully connect this time
+                return self.try_connect(origin, user);
             }
 
             return Connection::Cyclic;
@@ -903,9 +881,17 @@ impl Context {
             .then(|| id::Node::new(node_id))
     }
 
-    /// Connects `origin` to `user` without any checks for cycles of recenv-transformation.
+    /// Connects `origin` to `user`
     ///
-    /// PANICS: If `origin` and `user` ports aren't in the same region.
+    /// # Safety
+    ///
+    /// Does not check for cycles or recenv-transformations, which can lead to violation of RVSDG
+    /// rules.
+    ///
+    ///
+    /// # Panics
+    ///
+    /// If `origin` and `user` ports aren't in the same region.
     pub unsafe fn connect_same_region(&mut self, origin: Origin, user: User) {
         info!("{} -> {}", self.debug_origin(origin), self.debug_user(user));
 
