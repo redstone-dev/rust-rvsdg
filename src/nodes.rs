@@ -1,4 +1,4 @@
-use crate::{Context, Origin, User, id, node_kind_impl};
+use crate::{Context, Origin, User, binop_node_kind_impl, id, node_kind_impl};
 use std::any::Any;
 
 pub trait NodeKind: std::any::Any + std::fmt::Debug + Send + Sync {
@@ -48,6 +48,79 @@ node_kind_impl!(Placeholder, "placeholder");
 pub struct RecEnv {}
 node_kind_impl!(RecEnv, "phi");
 
+#[derive(Debug, Clone)]
+pub struct Add {}
+binop_node_kind_impl!(Add, "+");
+
+#[derive(Debug, Clone)]
+pub struct Sub {}
+binop_node_kind_impl!(Sub, "-");
+
+#[derive(Debug, Clone)]
+pub struct Mul {}
+binop_node_kind_impl!(Mul, "*");
+
+#[derive(Debug, Clone)]
+pub struct Div {}
+binop_node_kind_impl!(Div, "/");
+
+#[derive(Debug, Clone)]
+pub struct Rem {}
+binop_node_kind_impl!(Rem, "%");
+
+#[derive(Debug, Clone)]
+pub struct LessThan {}
+binop_node_kind_impl!(LessThan, "<");
+
+#[derive(Debug, Clone)]
+pub struct GreaterThan {}
+binop_node_kind_impl!(GreaterThan, ">");
+
+#[derive(Debug, Clone)]
+pub struct LessThanInclusive {}
+binop_node_kind_impl!(LessThanInclusive, "<=");
+
+#[derive(Debug, Clone)]
+pub struct GreaterThanInclusive {}
+binop_node_kind_impl!(GreaterThanInclusive, ">=");
+
+#[derive(Debug, Clone)]
+pub struct BitAnd {}
+binop_node_kind_impl!(BitAnd, "|");
+
+#[derive(Debug, Clone)]
+pub struct BitOr {}
+binop_node_kind_impl!(BitOr, "&");
+
+#[derive(Debug, Clone)]
+pub struct BitXOr {}
+binop_node_kind_impl!(BitXOr, "^");
+
+#[derive(Debug, Clone)]
+pub struct BitNot {}
+binop_node_kind_impl!(BitNot, "!");
+
+#[derive(Debug, Clone)]
+pub struct ShiftLeft {}
+binop_node_kind_impl!(ShiftLeft, "<<");
+
+#[derive(Debug, Clone)]
+pub struct ShiftRight {}
+binop_node_kind_impl!(ShiftRight, ">>");
+
+#[derive(Debug, Clone)]
+pub struct Eq {}
+binop_node_kind_impl!(Eq, "==");
+
+#[derive(Debug, Clone)]
+pub struct NotEq {}
+binop_node_kind_impl!(NotEq, "!=");
+
+pub trait BinOpKind: NodeKind {
+    fn symbol() -> &'static str;
+    fn new() -> Self;
+}
+
 #[macro_export]
 macro_rules! node_kind_impl {
     ($ty:ty, $kind:literal) => {
@@ -62,6 +135,23 @@ macro_rules! node_kind_impl {
 
             fn node_type(&self) -> &str {
                 $kind
+            }
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! binop_node_kind_impl {
+    ($ty:ty, $kind:literal) => {
+        node_kind_impl!($ty, $kind);
+
+        impl BinOpKind for $ty {
+            fn symbol() -> &'static str {
+                $kind
+            }
+
+            fn new() -> Self {
+                Self {}
             }
         }
     };

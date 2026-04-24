@@ -31,8 +31,8 @@ fn simple_cyclic() {
     test_logger();
     let mut ctx = Context::new("test(connect from deeply nested)");
 
-    let first = ctx.add_placeholder_node("first");
-    let second = ctx.add_placeholder_node("second");
+    let [first] = ctx.add_placeholder_node("first", []);
+    let [second] = ctx.add_placeholder_node("second", []);
 
     let first_input = ctx.add_input(first.node);
     let second_input = ctx.add_input(second.node);
@@ -115,19 +115,13 @@ fn phi() {
         let fb_input = ctx.add_input(fa.node);
         let fb = ctx.input_as_argument(fa_region, fb_input).unwrap();
 
-        let num = ctx.add_number_node(1);
+        let y = ctx.add_number_node(1);
 
-        let plus = ctx.add_placeholder_node("+");
-        let plus_x = ctx.add_input(plus.node);
-        let plus_y = ctx.add_input(plus.node);
-        ctx.connect(x, plus_x);
-        ctx.connect(num, plus_y);
+        let ([add_x, add_y], out) = ctx.add_binop_node::<Add>();
+        ctx.connect(x, add_x);
+        ctx.connect(y, add_y);
 
-        let apply = ctx.add_apply_node();
-        let apply_output = ctx.add_output(apply.node);
-        let apply_parameter = ctx.add_input(apply.node);
-        ctx.connect(plus, apply_parameter);
-        ctx.connect(fb, apply);
+        let [apply_output] = ctx.add_and_connect_apply_node(fb, &[out]);
 
         let result = ctx.add_result();
         ctx.connect(apply_output, result);
@@ -143,19 +137,13 @@ fn phi() {
         let fa_input = ctx.add_input(fb.node);
         let fa = ctx.input_as_argument(fb_region, fa_input).unwrap();
 
-        let num = ctx.add_number_node(1);
+        let y = ctx.add_number_node(1);
 
-        let minus = ctx.add_placeholder_node("-");
-        let minus_x = ctx.add_input(minus.node);
-        let minus_y = ctx.add_input(minus.node);
-        ctx.connect(x, minus_x);
-        ctx.connect(num, minus_y);
+        let ([sub_x, sub_y], out) = ctx.add_binop_node::<Sub>();
+        ctx.connect(x, sub_x);
+        ctx.connect(y, sub_y);
 
-        let apply = ctx.add_apply_node();
-        let apply_output = ctx.add_output(apply.node);
-        let apply_parameter = ctx.add_input(apply.node);
-        ctx.connect(minus, apply_parameter);
-        ctx.connect(fa, apply);
+        let [apply_output] = ctx.add_and_connect_apply_node(fa, &[out]);
 
         let result = ctx.add_result();
         ctx.connect(apply_output, result);
@@ -171,12 +159,9 @@ fn phi() {
         let main_fa_arg = ctx.input_as_argument(main_region, main_fa_input).unwrap();
 
         let init = ctx.add_number_node(10);
-        let apply = ctx.add_apply_node();
-        ctx.connect(main_fa_arg, apply);
-        let apply_arg = ctx.add_input(apply.node);
-        ctx.connect(init, apply_arg);
 
-        let apply_output = ctx.add_output(apply.node);
+        let [apply_output] = ctx.add_and_connect_apply_node(main_fa_arg, &[init]);
+
         let result = ctx.add_result();
         ctx.connect(apply_output, result);
 

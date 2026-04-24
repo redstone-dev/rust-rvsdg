@@ -8,8 +8,8 @@ pub use edge::{Argument, Edge, Input, Origin, Output, Result, User};
 use entity_iterator::EntityIter;
 pub mod id;
 pub mod nodes;
-pub use nodes::NodeKind;
 use nodes::*;
+pub use nodes::{BinOpKind, NodeKind};
 #[cfg(test)]
 mod tests;
 mod xml;
@@ -269,6 +269,18 @@ impl Context {
         node
     }
 
+    pub fn add_binop_node<N: BinOpKind>(&mut self) -> ([Input<N>; 2], Output<N>) {
+        let node = self.add_node(|_, _| N::new());
+        self.add_symbol(node.id, N::symbol());
+
+        let x = self.add_input(node);
+        let y = self.add_input(node);
+
+        let out = self.add_output(node);
+
+        ([x, y], out)
+    }
+
     /// Create a lambda node.
     ///
     /// Lambda nodes have a singular region.
@@ -314,16 +326,36 @@ impl Context {
     //
     // GlobalV nodes have a singular region representing the initialization of a value.
     // GlobalV nodes regions have singular results, representing the initialized values.
-    // GlobalV nodes have a singualr output, representing the initialized value.
-    pub fn add_globalv_node(&mut self) -> (id::Result, Output<GlobalV>) {
-        let node_id = self.add_node(|ctx, node| {
+    // GlobalV nodes have a singular output, representing the initialized value.
+    pub fn add_globalv_node(&mut self) -> (Result, Output<GlobalV>) {
+        let node = self.add_node(|ctx, node| {
             ctx.add_region(node.id, 0, 1);
             GlobalV {}
         });
 
-        let output = self.add_output(node_id);
+        let output = self.add_output(node);
+        let region = self.only_child_region(node.id);
+        let id = self.regions[region].results.push(None);
+        let result = Result { region, id };
 
-        (id::Result::from_u32(0), output)
+        (result, output)
+    }
+
+    // Create a DoWhile (theta) node.
+    //
+    // DoWhile nodes have a singular region that represent their loop body
+    // The first region result represents the predicate.
+    pub fn add_dowhile_node(&mut self) -> Result {
+        let node = self.add_node(|ctx, node| {
+            ctx.add_region(node.id, 0, 1);
+            DoWhile {}
+        });
+
+        let region = self.only_child_region(node.id);
+        let id = self.regions[region].results.push(None);
+        let result = Result { region, id };
+
+        result
     }
 
     // Create a RecEnv (phi) node.
@@ -379,15 +411,42 @@ impl Context {
         self.add_input(node)
     }
 
+    // Convenience method for [`add_apply_node`]
+    pub fn add_and_connect_apply_node<const N: usize>(
+        &mut self,
+        f: impl Into<Origin>,
+        params: &[impl Into<Origin> + Clone],
+    ) -> [Output<Apply>; N] {
+        let input = self.add_apply_node();
+        self.connect(f, input);
+
+        for p in params {
+            let input = self.add_input(input.node);
+            self.connect(p.clone(), input);
+        }
+
+        [(); N].map(|_| self.add_output(input.node))
+    }
+
     // Create a placeholder node.
     //
     // Placeholder nodes have no regions and start with one output.
     //
     // They're meant to act as a "todo" node.
-    pub fn add_placeholder_node(&mut self, name: &'static str) -> Output<Placeholder> {
+    pub fn add_placeholder_node<const N: usize, const ON: usize>(
+        &mut self,
+        name: &'static str,
+        inputs: [Origin; N],
+    ) -> [Output<Placeholder>; ON] {
         let node = self.add_node(|_, _| Placeholder(name));
         self.add_symbol(node.id, name);
-        self.add_output(node)
+
+        for origin in inputs {
+            let input = self.add_input(node);
+            self.connect(origin, input);
+        }
+
+        [(); ON].map(|_| self.add_output(node))
     }
 
     fn debug_node(&self, node: id::AnyNode) -> String {
