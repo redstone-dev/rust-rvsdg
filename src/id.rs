@@ -1,3 +1,5 @@
+//! Raw ID types mapping to vectors in [`crate::Context`]
+
 use std::fmt;
 use std::marker::PhantomData;
 

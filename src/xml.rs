@@ -6,6 +6,10 @@ pub struct XmlCtx<'ctx> {
     xml: XmlWriter,
 }
 
+fn sanitize(name: &str) -> String {
+    name.replace(">", "&gt;").replace("<", "&lt;")
+}
+
 impl<'ctx> XmlCtx<'ctx> {
     pub fn write_node(&mut self, id: id::AnyNode) {
         let node = &self.ctx.node(id);
@@ -14,9 +18,11 @@ impl<'ctx> XmlCtx<'ctx> {
 
         self.xml.write_attribute("id", &node.id);
         if let Some(name) = self.ctx.symbols.get(id) {
-            self.xml.write_attribute("name", &name);
+            self.xml.write_attribute("name", &sanitize(name));
         }
-        self.xml.write_attribute("type", node.kind.node_type());
+
+        self.xml
+            .write_attribute("type", &sanitize(node.kind.node_type()));
 
         for i in self.ctx.inputs(id) {
             self.xml.start_element("input");
@@ -57,7 +63,7 @@ impl<'ctx> XmlCtx<'ctx> {
             self.write_node(node);
 
             for input in self.ctx.inputs(node) {
-                if let Some(origin) = self.ctx.get_input(input) {
+                if let Some(origin) = self.ctx.get_user(input) {
                     self.xml.start_element("edge");
                     self.xml.write_attribute("source", &origin);
                     self.xml.write_attribute("target", &input);
@@ -67,7 +73,7 @@ impl<'ctx> XmlCtx<'ctx> {
         }
 
         for result in self.ctx.results(region) {
-            if let Some(origin) = self.ctx.get_result(result) {
+            if let Some(origin) = self.ctx.get_user(result) {
                 self.xml.start_element("edge");
                 self.xml.write_attribute("source", &origin);
                 self.xml.write_attribute("target", &result);
@@ -79,14 +85,14 @@ impl<'ctx> XmlCtx<'ctx> {
     }
 }
 
-pub fn new_xml() -> XmlWriter {
+fn new_xml() -> XmlWriter {
     let opt = Options::default();
     let mut xml = XmlWriter::new(opt);
     xml.start_element("rvsdg");
     xml
 }
 
-pub fn open_viewer(xml: String) {
+pub(crate) fn open_viewer(xml: String) {
     let mut path = std::env::temp_dir();
     path.push("rvsdg.xml");
     let mut f = std::fs::File::create(&path).unwrap();
@@ -102,12 +108,6 @@ pub fn open_viewer(xml: String) {
 }
 
 impl Context {
-    pub fn add_to_xml(&self, xml: XmlWriter) -> XmlWriter {
-        let mut ctx = XmlCtx { xml, ctx: self };
-        ctx.write_node(id::AnyNode::from_u32(0));
-        ctx.xml
-    }
-
     pub fn to_xml(&self) -> String {
         let xml = new_xml();
 

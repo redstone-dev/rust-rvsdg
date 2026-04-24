@@ -1,42 +1,42 @@
 use super::{Context, id};
 use std::fmt;
 
-#[derive(Debug)]
-pub struct Edge {
-    pub origin: Origin,
-    pub user: User,
-}
-
+/// An user port
 #[derive(Clone, PartialEq, Eq, Debug, Copy, Hash)]
 pub enum User {
     Input(Input<id::AnyNode>),
     Result(Result),
 }
 
+/// An origin port
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Origin {
     Output(Output<id::AnyNode>),
     Argument(Argument),
 }
 
+/// Input `id` belonging to `node`
 #[derive(Hash)]
 pub struct Input<K> {
     pub node: id::Node<K>,
     pub id: id::Input,
 }
 
+/// Output `id` belonging to `node`
 #[derive(Hash)]
 pub struct Output<K> {
     pub node: id::Node<K>,
     pub id: id::Output,
 }
 
+/// Argument `id` belonging to `region`
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Argument {
     pub region: id::Region,
     pub id: id::Argument,
 }
 
+/// Result `id` belonging to `region`
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Result {
     pub region: id::Region,
@@ -62,19 +62,20 @@ impl<K> Input<K> {
 }
 
 impl Context {
-    pub fn user_associated_node(&self, user: User) -> id::AnyNode {
+    pub(crate) fn user_associated_node(&self, user: User) -> id::AnyNode {
         match user {
             User::Input(input) => input.node.id,
             User::Result(result) => self.regions[result.region].container_node,
         }
     }
-    pub fn origin_associated_node(&self, origin: Origin) -> id::AnyNode {
+    pub(crate) fn origin_associated_node(&self, origin: Origin) -> id::AnyNode {
         match origin {
             Origin::Output(output) => output.node.id,
             Origin::Argument(argument) => self.regions[argument.region].container_node,
         }
     }
 
+    /// Traverse nodes from `user` invoking `f` for each node `user` directly or indirectly depends on.
     pub fn visit_nodes_upwards<T, F>(&self, user: impl Into<User>, f: &mut F) -> Option<T>
     where
         F: FnMut(&Self, id::AnyNode) -> Option<T>,
@@ -87,7 +88,7 @@ impl Context {
                 }
 
                 let onode = self
-                    .get_input(input)
+                    .get_user(input)
                     .map(|origin| self.origin_associated_node(origin))?;
 
                 self.inputs(onode)
@@ -236,11 +237,5 @@ impl fmt::Display for User {
             User::Input(input) => input.fmt(f),
             User::Result(result) => result.fmt(f),
         }
-    }
-}
-
-impl fmt::Display for Edge {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{} <-> {}", self.origin, self.user)
     }
 }

@@ -1,11 +1,62 @@
+//! # rust-rvsdg
+//!
+//! This crate provides a mostly type-safe way of constructing and analyzing a [RVSDG](https://arxiv.org/abs/1912.05036)
+//!
+//! For developer familiarity, most node kinds have been renamed.
+//!
+//! * Gamma -> Switch
+//! * Theta -> DoWhile
+//! * Delta -> GlobalV
+//! * Phi   -> RecEnv
+//! * Omega -> TranslationUnit
+//!
+//! RecEnv nodes are created automatically when cyclic Lambda connections are made.
+//!
+//! # Constructing an RVSDG
+//!
+//! ```rust
+//! use rvsdg::{Context, nodes::Add};
+//!
+//! fn main() {
+//!     let mut ctx = Context::new("my testing graph");
+//!
+//!     let (f_output, f_region) = ctx.add_lambda_node();
+//!     ctx.in_region(f_region, |ctx| {
+//!         let one = ctx.add_number_node(1);
+//!         let two = ctx.add_number_node(2);
+//!
+//!         let ([x, y], addition) = ctx.add_binop_node::<Add>();
+//!
+//!         ctx.connect(one, x);
+//!         ctx.connect(two, y);
+//!
+//!         let returned = ctx.add_result();
+//!
+//!         ctx.connect(addition, returned);
+//!     });
+//!
+//!     let apply_input = ctx.add_apply_node();
+//!     ctx.connect(f_output, apply_input);
+//! }
+//! ```
+//!
+//! # Status
+//!
+//! Currently this crate is in an highly experimental phase.
+//!
+//! # Exporting an RVSDG
+//!
+//! If [rvsdg-viewer](https://github.com/phate/rvsdg-viewer) is installed,
+//! you can use [`Context::open_rvsdg_viewer`].
+
 use cranelift_entity::{EntityList, ListPool, PrimaryMap, SecondaryMap};
 use std::io::Write;
 use tracing::{info, trace};
 
 mod edge;
 mod entity_iterator;
-pub use edge::{Argument, Edge, Input, Origin, Output, Result, User};
-use entity_iterator::EntityIter;
+pub use edge::{Argument, Input, Origin, Output, Result, User};
+pub use entity_iterator::EntityIter;
 pub mod id;
 pub mod nodes;
 use nodes::*;
@@ -13,9 +64,8 @@ pub use nodes::{BinOpKind, NodeKind};
 #[cfg(test)]
 mod tests;
 mod xml;
-pub use xml::{new_xml, open_viewer};
 
-/// The context for a whole translation unit
+/// The context for a whole translation unit and the core struct of this crate.
 #[derive(Debug)]
 pub struct Context {
     nodes: PrimaryMap<id::AnyNode, Node>,
@@ -23,14 +73,14 @@ pub struct Context {
 
     symbols: SecondaryMap<id::AnyNode, String>,
 
-    node_id_pool: ListPool<id::AnyNode>,
-    region_id_pool: ListPool<id::Region>,
+    pub node_id_pool: ListPool<id::AnyNode>,
+    pub region_id_pool: ListPool<id::Region>,
 
     pub region: id::Region,
 }
 
 #[derive(Debug)]
-pub struct Node {
+pub(crate) struct Node {
     // Self-referential node id
     id: id::AnyNode,
     region: Option<id::Region>,
@@ -39,6 +89,7 @@ pub struct Node {
     outputs: PrimaryMap<id::Output, Vec<User>>,
 
     input_to_argument_offset: i32,
+    output_to_result_offset: i32,
 
     regions: EntityList<id::Region>,
 
@@ -47,26 +98,32 @@ pub struct Node {
     kind: Box<dyn NodeKind + Send + Sync>,
 }
 
+/// Event handlers for changes being made to the node or its contained regions.
+///
+/// Mainly used for ensuring inputs/outputs are correctly mapped to the nodes arguments/results
+/// according to the node kinds requirements.
 #[derive(Debug)]
-struct NodeHooks {
-    on_input: for<'a> fn(&'a mut Context, Input<id::AnyNode>),
-    on_output: for<'a> fn(&'a mut Context, Output<id::AnyNode>),
+pub struct NodeHooks {
+    /// Default: Forward this input as an argument to each contained region
+    pub on_input: for<'a> fn(&'a mut Context, Input<id::AnyNode>),
+    /// Default: Forward this output as an result to each contained region
+    pub on_output: for<'a> fn(&'a mut Context, Output<id::AnyNode>),
 
-    on_argument: for<'a> fn(&'a mut Context, Argument),
-    on_result: for<'a> fn(&'a mut Context, Result),
+    /// Default: Panic, arguments may only be added implicitly by new inputs being added to the node
+    pub on_argument: for<'a> fn(&'a mut Context, Argument),
+    /// Default: Panic, results may only be added implicitly by new outputs being added to the node
+    pub on_result: for<'a> fn(&'a mut Context, Result),
 }
 
 impl Default for NodeHooks {
     fn default() -> Self {
         Self {
-            // Forward this input as an argument to each contained region.
             on_input: |ctx, input| {
                 let mut regions = ctx.regions(input.node.id);
                 while let Some(region) = regions.next(&ctx.region_id_pool) {
                     ctx.regions[region].arguments.push(vec![]);
                 }
             },
-            // Forward this output as an result to each contained region
             on_output: |ctx, output| {
                 let mut regions = ctx.regions(output.node.id);
                 while let Some(region) = regions.next(&ctx.region_id_pool) {
@@ -74,7 +131,6 @@ impl Default for NodeHooks {
                 }
             },
 
-            // TODO: This can also be done statically
             on_argument: |_, _| {
                 panic!("node kind can not take explicit arguments in region");
             },
@@ -96,6 +152,9 @@ struct Region {
 }
 
 impl Context {
+    /// Initialize a new RVSDG translation unit.
+    ///
+    /// Sets the current region to the region of an implicitly declared `TranslationUnit` (omega ω) node.
     pub fn new(unit_symbol: impl Into<String>) -> Self {
         let mut ctx = Context {
             nodes: PrimaryMap::new(),
@@ -114,18 +173,18 @@ impl Context {
         ctx
     }
 
+    /// Perform `f` while [`Context::region`] is set to `region`.
     pub fn in_region<T>(&mut self, region: id::Region, f: impl FnOnce(&mut Self) -> T) -> T {
         let previous = self.region;
-        self.switch_region(region);
+        self.region = region;
         let v = f(self);
         self.region = previous;
         v
     }
 
-    pub fn switch_region(&mut self, region: id::Region) {
-        self.region = region;
-    }
-
+    /// Returns an non-borrowing iterator over regions of `node`.
+    ///
+    /// Use [`EntityIter::next`] with `Context::region_id_pool` as parameter to progress.
     pub fn regions(&self, node: id::AnyNode) -> EntityIter<id::Region> {
         EntityIter::from(self.nodes[node].regions.clone())
     }
@@ -160,6 +219,8 @@ impl Context {
             .keys()
             .map(move |id| Result { region, id })
     }
+
+    /// Returns an iterator of all nodes that are direct children of `region`.
     pub fn nodes(&self, region: id::Region) -> impl Iterator<Item = id::AnyNode> {
         self.regions[region]
             .nodes
@@ -169,6 +230,18 @@ impl Context {
     }
 
     /// Create a new empty node of any kind and manually initialize it with `init`
+    ///
+    /// WARNING: Only use this for constructing your own custom nodes. The nodes defined in
+    /// `crate::nodes` **must** be created by their corresponding `add_` prefixed methods.
+    ///
+    /// See:
+    ///  * [`Context::add_binop_node`]
+    ///  * [`Context::add_lambda_node`]
+    ///  * [`Context::add_switch_node`]
+    ///  * [`Context::add_globalv_node`]
+    ///  * [`Context::add_dowhile_node`]
+    ///  * [`Context::add_number_node`]
+    ///  * [`Context::add_apply_node`]
     pub fn add_node<F, K: NodeKind>(&mut self, init: F) -> id::Node<K>
     where
         F: FnOnce(&mut Self, id::Node<K>) -> K,
@@ -182,6 +255,7 @@ impl Context {
             id: self.nodes.next_key(),
             hooks: NodeHooks::default(),
             input_to_argument_offset: 0,
+            output_to_result_offset: 0,
         };
 
         let node = id::Node::new(self.nodes.push(node));
@@ -207,7 +281,9 @@ impl Context {
         self.symbols[node] = sym.into();
     }
 
-    pub fn add_region(
+    /// SAFETY: This function allows you to violate the rules of the RVSDG. To create regions safely,
+    /// use the safe functions such as [`Context::add_switch_branch`]
+    pub unsafe fn add_region(
         &mut self,
         container: id::AnyNode,
         arguments: u32,
@@ -243,10 +319,6 @@ impl Context {
         self.node(node).region
     }
 
-    pub fn lambda_output(&self, _node: id::Node<Lambda>) -> id::Output {
-        id::Output::from_u32(0)
-    }
-
     fn node(&self, node_id: id::AnyNode) -> &Node {
         &self.nodes[node_id]
     }
@@ -254,8 +326,12 @@ impl Context {
         &mut self.nodes[node_id]
     }
 
-    pub fn add_omega(&mut self) -> id::Node<TranslationUnit> {
-        let node = self.add_node(|ctx, node| {
+    pub fn node_hooks_mut(&mut self, node: id::AnyNode, mut f: impl FnMut(&mut NodeHooks)) {
+        f(&mut self.node_mut(node).hooks)
+    }
+
+    fn add_omega(&mut self) -> id::Node<TranslationUnit> {
+        let node = self.add_node(|ctx, node| unsafe {
             ctx.add_region(node.id, 0, 0);
             TranslationUnit {}
         });
@@ -269,6 +345,9 @@ impl Context {
         node
     }
 
+    /// Create a BinOpKind simple node.
+    ///
+    /// BinOpKind nodes have two inputs, and one output.
     pub fn add_binop_node<N: BinOpKind>(&mut self) -> ([Input<N>; 2], Output<N>) {
         let node = self.add_node(|_, _| N::new());
         self.add_symbol(node.id, N::symbol());
@@ -285,41 +364,44 @@ impl Context {
     ///
     /// Lambda nodes have a singular region.
     /// Lambda nodes have a singular output, representing itself.
-    pub fn add_lambda_node(&mut self) -> Output<Lambda> {
-        let node = self.add_node(|ctx, node| {
+    /// Lambda nodes may have arguments manually declared in their region as long as no inputs have been added.
+    pub fn add_lambda_node(&mut self) -> (Output<Lambda>, id::Region) {
+        let node = self.add_node(|ctx, node| unsafe {
             ctx.add_region(node.id, 0, 0);
             Lambda {}
         });
 
-        // Allow adding arguments
-        self.node_mut(node.id).hooks.on_argument = |ctx, arg| {
-            let node_id = ctx.regions[arg.region].container_node;
-            ctx.node_mut(node_id).input_to_argument_offset += 1;
-        };
+        self.node_hooks_mut(node.id, |hooks| {
+            // Allow adding arguments
+            hooks.on_argument = |ctx, arg| {
+                let node_id = ctx.regions[arg.region].container_node;
+                ctx.node_mut(node_id).input_to_argument_offset += 1;
+            };
 
-        // Allow adding results
-        self.node_mut(node.id).hooks.on_result = |_, _| {};
+            // Allow adding results
+            hooks.on_result = |_, _| {};
 
-        // Don't forward outputs to region results
-        self.node_mut(node.id).hooks.on_output = |_, _| {};
+            // Don't forward outputs to region results
+            hooks.on_output = |_, _| {};
+        });
 
-        self.add_output(node)
+        let region = self.only_child_region(node.id);
+
+        (self.add_output(node), region)
     }
 
-    /// Create a switch (gamma) node.
-    ///
-    /// Switch nodes first input is a predicate which determines which region is under evaluation.
-    /// Switch node regions have the same amount of results as the node has outputs.
-    /// Switch node region results are mapped to switch node outputs.
+    /// Create a new region in `node` which will correspond to the next number.
     pub fn add_switch_branch(&mut self, node: id::Node<Switch>) -> (id::Region, usize) {
         let i = self.node(node.id).regions.len(&self.region_id_pool);
 
         let n_of_arguments = self.node(node.id).inputs.len() - 1;
         let n_of_results = self.node(node.id).outputs.len();
 
-        let region = self.add_region(node.id, n_of_arguments as u32, n_of_results as u32);
+        unsafe {
+            let region = self.add_region(node.id, n_of_arguments as u32, n_of_results as u32);
 
-        (region, i)
+            (region, i)
+        }
     }
 
     // Create a globalv (delta) node.
@@ -328,7 +410,7 @@ impl Context {
     // GlobalV nodes regions have singular results, representing the initialized values.
     // GlobalV nodes have a singular output, representing the initialized value.
     pub fn add_globalv_node(&mut self) -> (Result, Output<GlobalV>) {
-        let node = self.add_node(|ctx, node| {
+        let node = self.add_node(|ctx, node| unsafe {
             ctx.add_region(node.id, 0, 1);
             GlobalV {}
         });
@@ -345,17 +427,43 @@ impl Context {
     //
     // DoWhile nodes have a singular region that represent their loop body
     // The first region result represents the predicate.
-    pub fn add_dowhile_node(&mut self) -> Result {
-        let node = self.add_node(|ctx, node| {
-            ctx.add_region(node.id, 0, 1);
-            DoWhile {}
-        });
+    pub fn add_dowhile_node(&mut self) -> (Result, id::Node<DoWhile>) {
+        let node = self.add_node(|_, _| DoWhile {});
 
-        let region = self.only_child_region(node.id);
-        let id = self.regions[region].results.push(None);
-        let result = Result { region, id };
+        // compensate for do-while node regions not having the predicate result forwarded
+        self.node_mut(node.id).output_to_result_offset = 1;
 
-        result
+        let region = unsafe { self.add_region(node.id, 0, 1) };
+
+        // do-while forwards inputs to arguments, results, and outputs
+        self.node_mut(node.id).hooks.on_input = |ctx, input| {
+            let mut regions = ctx.regions(input.node.id);
+            while let Some(region) = regions.next(&ctx.region_id_pool) {
+                let arg_id = ctx.regions[region].arguments.push(vec![]);
+                let result_id = ctx.regions[region].results.push(None);
+                debug_assert_eq!(input.id.as_u32(), arg_id.as_u32());
+                debug_assert_eq!(input.id.as_u32(), result_id.as_u32() - 1);
+            }
+            ctx.nodes[input.node.id].outputs.push(vec![]);
+        };
+        // adding an output or an input are equivalent for dowhile
+        self.node_mut(node.id).hooks.on_output = |ctx, output| {
+            let mut regions = ctx.regions(output.node.id);
+            while let Some(region) = regions.next(&ctx.region_id_pool) {
+                let arg_id = ctx.regions[region].arguments.push(vec![]);
+                let result_id = ctx.regions[region].results.push(None);
+                debug_assert_eq!(output.id.as_u32(), arg_id.as_u32());
+                debug_assert_eq!(output.id.as_u32(), result_id.as_u32() - 1);
+            }
+        };
+
+        let result = Result {
+            region,
+            id: id::Result::from_u32(0),
+        };
+        trace!("adding predicate result {result}");
+
+        (result, node)
     }
 
     // Create a RecEnv (phi) node.
@@ -363,7 +471,7 @@ impl Context {
     // RecEnv nodes have a singular region, containing lambdas that can be mutually recursive.
     // RecEnv nodes have an output for each contained lambda.
     pub fn add_recenv_node(&mut self) -> id::Node<RecEnv> {
-        let node = self.add_node(|ctx, node| {
+        let node = self.add_node(|ctx, node| unsafe {
             ctx.add_region(node.id, 0, 0);
             RecEnv {}
         });
@@ -373,7 +481,13 @@ impl Context {
 
         node
     }
-
+    /// Create a switch (gamma) node.
+    ///
+    /// Switch nodes first input is a predicate which determines which region is under evaluation.
+    /// Switch node regions have the same amount of results as the node has outputs.
+    /// Switch node region results are mapped to switch node outputs.
+    ///
+    /// See [`Context::add_switch_branch`]
     pub fn add_switch_node(&mut self) -> (Input<Switch>, id::Node<Switch>) {
         let node = self.add_node(|_, _| Switch);
 
@@ -430,7 +544,7 @@ impl Context {
 
     // Create a placeholder node.
     //
-    // Placeholder nodes have no regions and start with one output.
+    // Placeholder nodes have no regions and may take any amount of inputs and outputs.
     //
     // They're meant to act as a "todo" node.
     pub fn add_placeholder_node<const N: usize, const ON: usize>(
@@ -509,54 +623,22 @@ impl Context {
 
     pub fn result_as_output<K>(&self, result: Result) -> Output<K> {
         let container = self.regions[result.region].container_node;
+        let offset = self.node(container).output_to_result_offset;
 
         // TODO: Is this valid for all nodes? Probably not right?
         //
         // We could assert but I think its better to stop this statically
-        let output = id::Output::from_u32(result.id.as_u32());
+        let output = id::Output::from_u32(result.id.as_u32().checked_sub_signed(offset).unwrap());
         id::Node::new(container).output(output)
     }
 
-    pub fn output_as_result<K>(&self, region: id::Region, output: Output<K>) -> Result {
+    pub fn try_output_as_result<K>(&self, region: id::Region, output: Output<K>) -> Result {
+        let offset = self.node(output.node.id).output_to_result_offset;
+        let id = id::Result::from_u32(output.id.as_u32().checked_add_signed(offset).unwrap());
+
         assert_eq!(self.regions[region].container_node, output.node.id);
-        Result {
-            region,
-            id: id::Result::from_u32(output.id.as_u32()),
-        }
-    }
 
-    pub fn input_as_argument<K>(&self, region: id::Region, input: Input<K>) -> Option<Argument> {
-        let offset = self.node(input.node.id).input_to_argument_offset;
-        let arg = id::Argument::from_u32(input.id.as_u32().checked_add_signed(offset)? as u32);
-
-        #[cfg(debug_assertions)]
-        {
-            let mut iter = self.regions(input.node.id);
-            while let Some(region) = iter.next(&self.region_id_pool) {
-                assert!(
-                    self.regions[region].arguments.get(arg).is_some(),
-                    "input was not forwarded to {} in regions of this node kind",
-                    arg
-                );
-            }
-        }
-
-        Some(region.argument(arg))
-    }
-
-    pub fn argument_as_input(&self, argument: Argument) -> Option<Input<id::AnyNode>> {
-        let node_id = self.regions[argument.region].container_node;
-
-        let offset = self.node(node_id).input_to_argument_offset;
-        argument
-            .id
-            .as_u32()
-            .checked_sub_signed(offset)
-            .map(id::Input::from_u32)
-            .map(|id| Input {
-                id,
-                node: id::Node::new(node_id),
-            })
+        region.result(id)
     }
 
     pub fn add_argument(&mut self) -> Argument {
@@ -589,6 +671,12 @@ impl Context {
         result
     }
 
+    /// Connect `origin` to `user`, and use pathfinding in case they're of different regions to
+    /// automatically form the connections needed to make `origin` available to `user`.
+    ///
+    /// If both the `origin` and `user` ports attach to lambdas in the same region, then `connect`
+    /// may move the lambdas into a node RecEnv (phi ϕ) node - re-arranging all connections to those
+    /// lambdas as-needed.
     pub fn connect(&mut self, origin: impl Into<Origin>, user: impl Into<User>) {
         let origin = origin.into();
         let user = user.into();
@@ -598,22 +686,15 @@ impl Context {
         }
     }
 
-    pub fn get_input<K>(&self, input: Input<K>) -> Option<Origin> {
-        self.nodes[input.node.id].inputs[input.id]
-    }
-
-    pub fn get_result(&self, result: Result) -> Option<Origin> {
-        self.regions[result.region].results[result.id]
-    }
-
-    pub fn get_argument(&self, arg: Argument) -> &[User] {
-        &self.regions[arg.region].arguments[arg.id]
-    }
-
-    pub fn get_user(&self, user: User) -> Option<Origin> {
-        match user {
-            User::Input(input) => self.get_input(input),
-            User::Result(result) => self.get_result(result),
+    /// Retrieve the `Origin` directly attached to the port `user`.
+    ///
+    /// # Arguments
+    ///
+    /// * `user` a node [`Input`] or region [`Result`]
+    pub fn get_user(&self, user: impl Into<User>) -> Option<Origin> {
+        match user.into() {
+            User::Input(input) => self.nodes[input.node.id].inputs[input.id],
+            User::Result(result) => self.regions[result.region].results[result.id],
         }
     }
 
@@ -627,7 +708,7 @@ impl Context {
         })
     }
 
-    /// Try to find a path to make the connection. Returns false if unable.
+    /// Same as [`Context::connect`] except returns [`Connection`] result instead of panicing.
     pub fn try_connect(&mut self, origin: impl Into<Origin>, user: impl Into<User>) -> Connection {
         let mut origin = origin.into();
         let user = user.into();
@@ -691,11 +772,11 @@ impl Context {
             [region_with_user, region_with_origin],
             &mut |ctx, origin, (node, region_in_node)| {
                 for input in ctx.inputs(node) {
-                    let Some(argument) = ctx.input_as_argument(region_in_node, input) else {
+                    let Some(argument) = ctx.try_input_as_argument(region_in_node, input) else {
                         continue;
                     };
 
-                    if ctx.get_input(input) == Some(origin) {
+                    if ctx.get_user(input) == Some(origin) {
                         trace!("connection already exists, returning existing argument");
                         return argument.into();
                     }
@@ -705,7 +786,7 @@ impl Context {
 
                 unsafe {
                     ctx.connect_same_region(origin, input.into());
-                    let argument = ctx.input_as_argument(region_in_node, input).unwrap();
+                    let argument = ctx.input_as_argument(region_in_node, input);
                     argument.into()
                 }
             },
@@ -777,7 +858,7 @@ impl Context {
         F: FnMut(Input<id::AnyNode>, Origin) -> Option<T>,
     {
         self.inputs(node).find_map(|input| {
-            let connected = self.get_input(input)?;
+            let connected = self.get_user(input)?;
 
             if let Some(target) = f(input, connected) {
                 return Some(target);
@@ -786,7 +867,7 @@ impl Context {
             match connected {
                 Origin::Output(output) => self.search_each_connected_input(output.node.id, f),
                 Origin::Argument(argument) => self
-                    .argument_as_input(argument)
+                    .try_argument_as_input(argument)
                     .and_then(|input| self.search_each_connected_input(input.node.id, f)),
             }
         })
@@ -812,7 +893,8 @@ impl Context {
         self.node_mut(input.node.id).inputs[input.id] = Some(argument.into());
     }
 
-    fn downcast<K: NodeKind>(&self, node_id: id::AnyNode) -> Option<id::Node<K>> {
+    /// Returns the statically typed version of a node if it downcasts to `K`.
+    pub fn downcast<K: NodeKind>(&self, node_id: id::AnyNode) -> Option<id::Node<K>> {
         self.nodes[node_id]
             .kind
             .as_any()
@@ -821,7 +903,10 @@ impl Context {
             .then(|| id::Node::new(node_id))
     }
 
-    unsafe fn connect_same_region(&mut self, origin: Origin, user: User) {
+    /// Connects `origin` to `user` without any checks for cycles of recenv-transformation.
+    ///
+    /// PANICS: If `origin` and `user` ports aren't in the same region.
+    pub unsafe fn connect_same_region(&mut self, origin: Origin, user: User) {
         info!("{} -> {}", self.debug_origin(origin), self.debug_user(user));
 
         debug_assert_eq!(
@@ -896,6 +981,7 @@ impl Context {
         }
     }
 
+    /// Calls `f` for each connection to inputs and outputs of `node`.
     pub fn for_each_edge<F>(&mut self, node: id::AnyNode, mut f: F)
     where
         F: FnMut(Origin, User),
@@ -913,11 +999,15 @@ impl Context {
         }
     }
 
+    /// Launches [`rvsdg-viewer`](https://github.com/phate/rvsdg-viewer) to visualize the current RVSDG.
+    ///
+    /// NOTE: Only works on valid RVSDG's.
     pub fn open_rvsdg_viewer(&mut self) {
         let xml = self.to_xml();
         xml::open_viewer(xml)
     }
 
+    /// Prints which regions belong to which nodes.
     pub fn dump_region_mapping(&mut self) {
         println!("Region Mapping:");
         for (r, region) in self.regions.iter() {
@@ -927,6 +1017,9 @@ impl Context {
     }
 }
 
+/// The result of attempting to connect an origin to a user
+///
+/// See: [`Context::connect`]
 #[derive(PartialEq, Eq, Debug)]
 pub enum Connection {
     Ok,

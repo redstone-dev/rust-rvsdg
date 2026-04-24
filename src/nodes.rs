@@ -1,4 +1,27 @@
-use crate::{Context, Origin, User, binop_node_kind_impl, id, node_kind_impl};
+//! Default Node kinds and traits for declaring your own
+//!
+//! To create your own node, implement the `NodeKind` trait and declare your own constructor.
+//! ```rust
+//! use rvsdg::{node_kind_impl, Context, Input, Output};
+//!
+//! #[derive(Debug, Clone)]
+//! struct Increment {}
+//! node_kind_impl!(Increment, "inc");
+//!
+//! fn add_increment_node(ctx: &mut Context) -> (Input<Increment>, Output<Increment>) {
+//!     let node = ctx.add_node(|_, _| Increment {});
+//!     let input = ctx.add_input(node);
+//!     let output = ctx.add_output(node);
+//!     (input, output)
+//! }
+//! ```
+//!
+//! For defining new advanced node kinds, see [`Context::node_hooks_mut`]
+
+use crate::{
+    Argument, Context, Input, Origin, Output, Result, User, binop_node_kind_impl, id,
+    node_kind_impl,
+};
 use std::any::Any;
 
 pub trait NodeKind: std::any::Any + std::fmt::Debug + Send + Sync {
@@ -124,7 +147,7 @@ pub trait BinOpKind: NodeKind {
 #[macro_export]
 macro_rules! node_kind_impl {
     ($ty:ty, $kind:literal) => {
-        impl NodeKind for $ty {
+        impl $crate::NodeKind for $ty {
             fn as_any(&self) -> &dyn std::any::Any {
                 self
             }
@@ -145,7 +168,7 @@ macro_rules! binop_node_kind_impl {
     ($ty:ty, $kind:literal) => {
         node_kind_impl!($ty, $kind);
 
-        impl BinOpKind for $ty {
+        impl $crate::BinOpKind for $ty {
             fn symbol() -> &'static str {
                 $kind
             }
@@ -157,8 +180,26 @@ macro_rules! binop_node_kind_impl {
     };
 }
 
+pub trait InputOutForwarding: NodeKind {
+    fn as_result_offset() -> u32;
+    fn as_output_offset() -> u32;
+}
+
+impl InputOutForwarding for DoWhile {
+    fn as_result_offset() -> u32 {
+        1
+    }
+
+    fn as_output_offset() -> u32 {
+        0
+    }
+}
+
 impl Context {
-    pub fn move_to_new_recenv(&mut self, [origin_lambda, user_lambda]: [id::Node<Lambda>; 2]) {
+    pub(crate) fn move_to_new_recenv(
+        &mut self,
+        [origin_lambda, user_lambda]: [id::Node<Lambda>; 2],
+    ) {
         let env = self.add_recenv_node();
         let env_region = self.only_child_region(env.id);
 
@@ -178,5 +219,94 @@ impl Context {
         for (origin, user) in disconnected {
             self.connect(origin, user);
         }
+    }
+
+    /// Retrieve the `Result` that will be mapped to the given `input`.
+    ///
+    /// Available for `DoWhile` (theta Θ) nodes.
+    pub fn input_as_result<N: InputOutForwarding>(&self, input: Input<N>) -> Result {
+        let region = self.only_child_region(input.node.id);
+        let offset = N::as_result_offset();
+        Result {
+            region,
+            id: id::Result::from_u32(input.id.as_u32() + offset),
+        }
+    }
+
+    /// Since DoWhile (theta Θ) nodes must have at least outputs and results that match the
+    /// nodes inputs, its possible to retrieve an corresponding Output node from an Input.
+    pub fn input_as_output(&self, input: Input<DoWhile>) -> Output<DoWhile> {
+        input.node.output(id::Output::from_u32(input.id.as_u32()))
+    }
+
+    /// Since DoWhile (theta Θ) nodes must have at least outputs and results that match the
+    /// nodes inputs, its possible to retrieve an corresponding Input node from an Output.
+    pub fn output_as_input(&self, output: Output<DoWhile>) -> Input<DoWhile> {
+        output.node.input(id::Input::from_u32(output.id.as_u32()))
+    }
+
+    /// Retrieve the input that maps to `argument`.
+    ///
+    /// Returns None if this argument is not mapped to an input, such as for Translation Unit (Omega ω)
+    /// or lambda function parameter arguments.
+    pub fn try_argument_as_input(&self, argument: Argument) -> Option<Input<id::AnyNode>> {
+        let node_id = self.regions[argument.region].container_node;
+
+        // Omega nodes can not forward arguments as inputs
+        if self.node(node_id).region.is_none() {
+            return None;
+        }
+
+        let offset = self.node(node_id).input_to_argument_offset;
+        argument
+            .id
+            .as_u32()
+            .checked_sub_signed(offset)
+            .map(id::Input::from_u32)
+            .map(|id| Input {
+                id,
+                node: id::Node::new(node_id),
+            })
+    }
+
+    /// Get the argument in `region` that maps to the given `input`
+    ///
+    /// For Lambda nodes, this will be offset by the amount of function parameter arguments.
+    /// For Switch nodes, this will be offset by 1 as the predicate is not forwarded as an argument to the regions.
+    ///
+    /// PANICS: If `region` must be direct child of the `input` node.
+    pub fn input_as_argument<N>(&self, region: id::Region, input: Input<N>) -> Argument {
+        self.try_input_as_argument(region, input).unwrap()
+    }
+
+    /// Get the argument in `region` that maps to the given `input`
+    ///
+    /// Returns `None` if this input isn't mapped to any argument (such as Switch node predicate)
+    pub fn try_input_as_argument<N>(
+        &self,
+        region: id::Region,
+        input: Input<N>,
+    ) -> Option<Argument> {
+        let offset = self.node(input.node.id).input_to_argument_offset;
+        let arg = id::Argument::from_u32(input.id.as_u32().checked_add_signed(offset)?);
+
+        #[cfg(debug_assertions)]
+        {
+            let mut is_child = false;
+            let mut iter = self.regions(input.node.id);
+            while let Some(r) = iter.next(&self.region_id_pool) {
+                is_child |= r == region;
+                assert!(
+                    self.regions[r].arguments.get(arg).is_some(),
+                    "input was not forwarded to {} in regions of this node kind",
+                    arg
+                );
+            }
+            if !is_child {
+                panic!("`{region}` is not a direct child of `{}`", input.node);
+            }
+        }
+
+        Some(region.argument(arg))
     }
 }
