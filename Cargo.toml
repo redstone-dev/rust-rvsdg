@@ -16,8 +16,8 @@ default = []
 
 [dependencies]
 cranelift-entity = "0.120.0"
+tracing = "0.1.44"
 xmlwriter = "0.1.0"
-tracing = "*"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
