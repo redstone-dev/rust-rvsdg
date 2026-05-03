@@ -227,10 +227,10 @@ fn theta() {
 
 // Test for [Figure 1 (d)](https://arxiv.org/abs/1912.05036)
 #[test]
-fn temp_png_graph() {
+fn large_theta_figure() {
     test_logger();
 
-    let mut ctx = Context::new("test(temp.png graph)");
+    let mut ctx = Context::new("test(large theta figure)");
 
     let (f, f_region) = ctx.add_lambda_node();
     ctx.add_symbol(f.node.id, "f");
@@ -339,6 +339,44 @@ fn temp_png_graph() {
         ctx.connect(theta_last_output, lower_add_y);
         ctx.connect(lower_add_out, f_result);
     });
+
+    if OPEN_VIEWER {
+        ctx.open_rvsdg_viewer();
+    }
+}
+
+#[test]
+fn inline_opt() {
+    test_logger();
+    let mut ctx = Context::new("test(connect from deeply nested)");
+
+    let five = ctx.add_number_node(5);
+    let two = ctx.add_number_node(2);
+
+    let (lambda, region) = ctx.add_lambda_node();
+
+    ctx.in_region(region, |ctx| {
+        let arg = ctx.add_argument();
+        let input = ctx.add_input(lambda.node);
+
+        ctx.connect(five, input);
+
+        let ([x, y], out) = ctx.add_binop_node::<Add>();
+
+        let input_arg = ctx.input_as_argument(region, input);
+        ctx.connect(input_arg, x);
+        ctx.connect(arg, y);
+
+        let result = ctx.add_result();
+        ctx.connect(out, result);
+    });
+
+    let [v] = ctx.add_and_connect_apply_node(lambda, &[two]);
+
+    let [] = ctx.add_placeholder_node("consume", [v.into()]);
+
+    ctx.opt_inline(lambda.node, v.node);
+    ctx.remove_node_from_region(lambda.node.id);
 
     if OPEN_VIEWER {
         ctx.open_rvsdg_viewer();

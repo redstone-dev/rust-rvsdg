@@ -24,6 +24,7 @@ use crate::{
 };
 use std::any::Any;
 
+#[clone_dyn::clone_dyn]
 pub trait NodeKind: std::any::Any + std::fmt::Debug + Send + Sync {
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
@@ -36,23 +37,23 @@ pub struct Uninitialized;
 node_kind_impl!(Uninitialized, "uninitialized");
 
 #[derive(Debug, Clone)]
-pub struct Apply {}
+pub struct Apply;
 node_kind_impl!(Apply, "apply");
 
 #[derive(Debug, Clone)]
-pub struct DoWhile {}
+pub struct DoWhile;
 node_kind_impl!(DoWhile, "theta");
 
 #[derive(Debug, Clone)]
-pub struct GlobalV {}
+pub struct GlobalV;
 node_kind_impl!(GlobalV, "delta");
 
 #[derive(Debug, Clone)]
-pub struct Lambda {}
+pub struct Lambda;
 node_kind_impl!(Lambda, "lambda");
 
 #[derive(Debug, Clone)]
-pub struct TranslationUnit {}
+pub struct TranslationUnit;
 node_kind_impl!(TranslationUnit, "omega");
 
 #[derive(Debug, Clone)]
@@ -68,75 +69,75 @@ pub struct Placeholder(pub &'static str);
 node_kind_impl!(Placeholder, "placeholder");
 
 #[derive(Debug, Clone)]
-pub struct RecEnv {}
+pub struct RecEnv;
 node_kind_impl!(RecEnv, "phi");
 
 #[derive(Debug, Clone)]
-pub struct Add {}
+pub struct Add;
 binop_node_kind_impl!(Add, "+");
 
 #[derive(Debug, Clone)]
-pub struct Sub {}
+pub struct Sub;
 binop_node_kind_impl!(Sub, "-");
 
 #[derive(Debug, Clone)]
-pub struct Mul {}
+pub struct Mul;
 binop_node_kind_impl!(Mul, "*");
 
 #[derive(Debug, Clone)]
-pub struct Div {}
+pub struct Div;
 binop_node_kind_impl!(Div, "/");
 
 #[derive(Debug, Clone)]
-pub struct Rem {}
+pub struct Rem;
 binop_node_kind_impl!(Rem, "%");
 
 #[derive(Debug, Clone)]
-pub struct LessThan {}
+pub struct LessThan;
 binop_node_kind_impl!(LessThan, "<");
 
 #[derive(Debug, Clone)]
-pub struct GreaterThan {}
+pub struct GreaterThan;
 binop_node_kind_impl!(GreaterThan, ">");
 
 #[derive(Debug, Clone)]
-pub struct LessThanInclusive {}
+pub struct LessThanInclusive;
 binop_node_kind_impl!(LessThanInclusive, "<=");
 
 #[derive(Debug, Clone)]
-pub struct GreaterThanInclusive {}
+pub struct GreaterThanInclusive;
 binop_node_kind_impl!(GreaterThanInclusive, ">=");
 
 #[derive(Debug, Clone)]
-pub struct BitAnd {}
+pub struct BitAnd;
 binop_node_kind_impl!(BitAnd, "|");
 
 #[derive(Debug, Clone)]
-pub struct BitOr {}
+pub struct BitOr;
 binop_node_kind_impl!(BitOr, "&");
 
 #[derive(Debug, Clone)]
-pub struct BitXOr {}
+pub struct BitXOr;
 binop_node_kind_impl!(BitXOr, "^");
 
 #[derive(Debug, Clone)]
-pub struct BitNot {}
+pub struct BitNot;
 binop_node_kind_impl!(BitNot, "!");
 
 #[derive(Debug, Clone)]
-pub struct ShiftLeft {}
+pub struct ShiftLeft;
 binop_node_kind_impl!(ShiftLeft, "<<");
 
 #[derive(Debug, Clone)]
-pub struct ShiftRight {}
+pub struct ShiftRight;
 binop_node_kind_impl!(ShiftRight, ">>");
 
 #[derive(Debug, Clone)]
-pub struct Eq {}
+pub struct Eq;
 binop_node_kind_impl!(Eq, "==");
 
 #[derive(Debug, Clone)]
-pub struct NotEq {}
+pub struct NotEq;
 binop_node_kind_impl!(NotEq, "!=");
 
 pub trait BinOpKind: NodeKind {
@@ -212,10 +213,10 @@ impl Context {
 
         // Disconnect all connections to these these lambdas
         let mut disconnected: Vec<(Origin, User)> = vec![];
-        self.for_each_edge(origin_lambda.id, |origin, user| {
+        self.drain_each_edge(origin_lambda.id, |origin, user| {
             disconnected.push((origin, user))
         });
-        self.for_each_edge(user_lambda.id, |origin, user| {
+        self.drain_each_edge(user_lambda.id, |origin, user| {
             disconnected.push((origin, user))
         });
 

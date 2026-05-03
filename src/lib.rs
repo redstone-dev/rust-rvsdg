@@ -48,11 +48,13 @@
 //! you can use [`Context::open_rvsdg_viewer`].
 
 use cranelift_entity::{EntityList, ListPool, PrimaryMap, SecondaryMap};
+use std::collections::HashMap;
 use std::io::Write;
 use tracing::{info, trace};
 
 mod edge;
 mod entity_iterator;
+mod opt;
 pub use edge::{Argument, Input, Origin, Output, Result, User};
 pub use entity_iterator::EntityIter;
 pub mod id;
@@ -100,7 +102,7 @@ pub(crate) struct Node {
 ///
 /// Mainly used for ensuring inputs/outputs are correctly mapped to the nodes arguments/results
 /// according to the node kinds requirements.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NodeHooks {
     /// Default: Forward this input as an argument to each contained region
     pub on_input: for<'a> fn(&'a mut Context, Input<id::AnyNode>),
@@ -219,12 +221,8 @@ impl Context {
     }
 
     /// Returns an iterator of all nodes that are direct children of `region`.
-    pub fn nodes(&self, region: id::Region) -> impl Iterator<Item = id::AnyNode> {
-        self.regions[region]
-            .nodes
-            .as_slice(&self.node_id_pool)
-            .iter()
-            .copied()
+    pub fn nodes(&self, region: id::Region) -> EntityIter<id::AnyNode> {
+        EntityIter::from(self.regions[region].nodes)
     }
 
     /// Create a new empty node of any kind and manually initialize it with `init`
@@ -273,6 +271,126 @@ impl Context {
         self.node_mut(node.id).kind = Box::new(kind);
 
         node
+    }
+
+    pub fn deep_clone_nodes_from(
+        &mut self,
+        from: id::Region,
+        arguments: &SecondaryMap<id::Argument, Option<Origin>>,
+        results: &SecondaryMap<id::Result, Option<Vec<User>>>,
+    ) {
+        struct Mapping<'a> {
+            // The origin which replaces this Argument
+            arguments: &'a SecondaryMap<id::Argument, Option<Origin>>,
+            // The user which replace this Result
+            results: &'a SecondaryMap<id::Result, Option<Vec<User>>>,
+
+            // The new NodeID's
+            nodes: HashMap<id::AnyNode, id::AnyNode>,
+        }
+
+        let mut mapping = Mapping {
+            nodes: HashMap::new(),
+            arguments,
+            results,
+        };
+
+        let mut nodes = self.nodes(from);
+        while let Some(node) = nodes.next(&self.node_id_pool) {
+            let new = {
+                let node = &self.nodes[node];
+
+                let new = Node {
+                    id: self.nodes.next_key(),
+                    region: Some(self.region),
+                    inputs: node.inputs.keys().map(|_| None).collect(),
+                    outputs: node.outputs.keys().map(|_| vec![]).collect(),
+                    input_to_argument_offset: node.input_to_argument_offset,
+                    output_to_result_offset: node.output_to_result_offset,
+                    regions: EntityList::new(),
+                    hooks: node.hooks.clone(),
+                    kind: node.kind.clone(),
+                };
+
+                self.nodes.push(new)
+            };
+
+            if let Some(sym) = self.symbols.get(node) {
+                self.symbols[new] = sym.clone();
+            }
+
+            self.regions[self.region]
+                .nodes
+                .push(new, &mut self.node_id_pool);
+
+            mapping.nodes.insert(node, new);
+        }
+
+        // Substitute the edges in the new nodes according to mapping
+        for (old, _) in mapping.nodes.iter() {
+            self.for_each_edge(*old, |ctx, origin, user| {
+                let origin = match origin {
+                    Origin::Output(output) => {
+                        id::Node::<id::AnyNode>::new(mapping.nodes[&output.node.id])
+                            .output(output.id)
+                            .into()
+                    }
+                    Origin::Argument(argument) => match mapping.arguments.get(argument.id) {
+                        Some(Some(origin)) => *origin,
+                        Some(None) => return,
+                        None => panic!("argument is unmapped: {argument}"),
+                    },
+                };
+
+                unsafe {
+                    match user {
+                        User::Input(input) => {
+                            let user = id::Node::<id::AnyNode>::new(mapping.nodes[&input.node.id])
+                                .input(input.id)
+                                .into();
+
+                            ctx.connect_same_region(origin, user);
+                        }
+                        User::Result(result) => match mapping.results.get(result.id) {
+                            Some(Some(users)) => {
+                                for user in users {
+                                    ctx.connect_same_region(origin, *user);
+                                }
+                            }
+                            Some(None) => return,
+                            None => panic!("argument is unmapped: {result}"),
+                        },
+                    };
+                }
+            });
+        }
+
+        // Deep-clone the regions in each node
+        for (old, new) in mapping.nodes.iter() {
+            let mut regions = self.regions(*old);
+            while let Some(region) = regions.next(&self.region_id_pool) {
+                let old = &self.regions[region];
+                unsafe {
+                    let new_region =
+                        self.add_region(*new, old.arguments.len() as u32, old.results.len() as u32);
+
+                    let mut arguments = SecondaryMap::new();
+                    let mut results = SecondaryMap::new();
+
+                    for arg in self.arguments(region) {
+                        arguments[arg.id] = Some(new_region.argument(arg.id).into());
+                    }
+
+                    for res in self.results(region) {
+                        results[res.id] = Some(vec![new_region.result(res.id).into()]);
+                    }
+
+                    self.in_region(new_region, |ctx| {
+                        ctx.deep_clone_nodes_from(region, &arguments, &results);
+                    });
+                }
+            }
+        }
     }
 
     pub fn add_symbol(&mut self, node: id::AnyNode, sym: impl Into<String>) {
@@ -677,6 +795,18 @@ impl Context {
         }
     }
 
+    /// Retrieve the `User`s directly attached to the port `origin`.
+    ///
+    /// # Arguments
+    ///
+    /// * `origin` a node [`Output`] or region [`Argument`]
+    pub fn get_origins(&self, origin: impl Into<Origin>) -> &[User] {
+        match origin.into() {
+            Origin::Output(output) => self.nodes[output.node.id].outputs[output.id].as_slice(),
+            Origin::Argument(arg) => self.regions[arg.region].arguments[arg.id].as_slice(),
+        }
+    }
+
     fn find_cycle(
         &self,
         [node_with_origin, node_with_user]: [id::AnyNode; 2],
@@ -685,6 +815,21 @@ impl Context {
             Origin::Output(output) => (output.node.id == node_with_user).then_some(output),
             Origin::Argument(_) => None,
         })
+    }
+
+    fn remove_node_from_region(&mut self, id: id::AnyNode) {
+        let Some(region) = self.nodes[id].region else {
+            return;
+        };
+
+        let i = self.regions[region]
+            .nodes
+            .as_slice(&self.node_id_pool)
+            .iter()
+            .position(|n| *n == id)
+            .unwrap();
+
+        self.regions[region].nodes.remove(i, &mut self.node_id_pool);
     }
 
     /// Same as [`Context::connect`] except returns [`Connection`] result instead of panicing.
@@ -932,21 +1077,12 @@ impl Context {
 
     fn move_node(&mut self, node: id::AnyNode, to: id::Region) {
         #[cfg(debug_assertions)]
-        self.for_each_edge(node, |origin, user| {
+        self.drain_each_edge(node, |origin, user| {
             panic!("cannot move node with connection: {origin} -> {user}")
         });
 
         // Remove the node from the previous region
-        if let Some(region) = self.node(node).region {
-            let i = self.regions[region]
-                .nodes
-                .as_slice(&self.node_id_pool)
-                .iter()
-                .position(|n| *n == node)
-                .unwrap();
-
-            self.regions[region].nodes.remove(i, &mut self.node_id_pool);
-        }
+        self.remove_node_from_region(node);
 
         // Add the node to the new region
         self.node_mut(node).region = Some(to);
@@ -968,7 +1104,7 @@ impl Context {
     }
 
     /// Calls `f` for each connection to inputs and outputs of `node`.
-    pub fn for_each_edge<F>(&mut self, node: id::AnyNode, mut f: F)
+    pub fn drain_each_edge<F>(&mut self, node: id::AnyNode, mut f: F)
     where
         F: FnMut(Origin, User),
     {
@@ -982,6 +1118,30 @@ impl Context {
             if let Some(origin) = self.nodes[input.node.id].inputs[input.id].take() {
                 f(origin, User::from(input));
             }
+        }
+    }
+
+    /// Calls `f` for each connection to inputs and outputs of `node`.
+    pub fn for_each_edge<F>(&mut self, node: id::AnyNode, mut f: F)
+    where
+        F: FnMut(&mut Self, Origin, User),
+    {
+        for output in self.outputs(node) {
+            for i in 0.. {
+                let Some(user) = self.get_origins(output).get(i).copied() else {
+                    break;
+                };
+
+                f(self, output.into(), user);
+            }
+        }
+
+        for input in self.inputs(node) {
+            let Some(origin) = self.get_user(input) else {
+                break;
+            };
+
+            f(self, origin, input.into());
         }
     }
 

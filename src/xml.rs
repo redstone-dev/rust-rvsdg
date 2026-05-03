@@ -59,7 +59,8 @@ impl<'ctx> XmlCtx<'ctx> {
             self.xml.end_element();
         }
 
-        for node in self.ctx.nodes(region) {
+        let mut nodes = self.ctx.nodes(region);
+        while let Some(node) = nodes.next(&self.ctx.node_id_pool) {
             self.write_node(node);
 
             for input in self.ctx.inputs(node) {
