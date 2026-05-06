@@ -50,7 +50,7 @@ can visualize the graph with:
 ctx.open_rvsdg_viewer();
 ```
 
-> On NixOS, enter the dev shell with `nix develop`.
+> On NixOS, enter the dev shell with `nix develop` before running the viewer.
 
 ## Custom Nodes
 
