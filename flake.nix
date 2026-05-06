@@ -11,7 +11,6 @@
       in {
         devShell = pkgs.mkShell {
           shellHook = ''
-              cp /home/juni/Code/flake-template/prompt.fish $(pwd)/prompt.fish
               fish -C "source prompt.fish"
               exit
             '';
