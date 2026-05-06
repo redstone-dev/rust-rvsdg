@@ -1,4 +1,4 @@
-# rvsdg
+<!-- # rvsdg -->
 
 `rvsdg` is a Rust library for constructing and analyzing
 [Regionalised Value State Dependence Graphs](https://arxiv.org/abs/1912.05036).
@@ -49,6 +49,8 @@ can visualize the graph with:
 ```rust
 ctx.open_rvsdg_viewer();
 ```
+
+> On NixOS, enter the dev shell with `nix develop`.
 
 ## Custom Nodes
 
